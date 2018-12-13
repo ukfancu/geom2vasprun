@@ -173,4 +173,4 @@ rm matrix.txt
 rm output
 rm helpfile*
 rm coords
-#rm energy
+rm energy
