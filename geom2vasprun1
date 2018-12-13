@@ -1,0 +1,176 @@
+#!/bin/bash
+
+#read in .cell file to obtain name of project, no and types of atoms, but mainly use .geom file to bring geometry opt process into a p4v-readable format
+namelong=$1
+name=${namelong%.cell}
+geom=$name.geom
+
+head -n10 /home/scm81/Documents/Scripting/geom2vasprun/vasprun.xml > test.xml
+echo -e "<incar>\n<i type=\"string\" name=\"SYSTEM\"> $name</i>\n</incar>\n<structure name=\"primitive cell\" >\n<crystal>\n <varray name=\"basis\" >" >> test.xml
+head -n7 $namelong | tail -n3 | awk '{print "<v>" "\t" $1 "\t" $2 "\t" $3 "</v>" }' >> test.xml
+
+#obtain transformation matrix from cartesian to fractional coordinates (invert and transpose via transform.py)
+head -n7 $namelong | tail -n3 | awk '{print $1 "\t" $2 "\t" $3 }' >> matrix.txt
+python /home/scm81/Documents/Scripting/geom2vasprun/transform.py >> output
+sed -i "s/\[//g" output
+sed -i "s/\]//g" output
+
+echo -e "</varray>\n</crystal>\n<varray name=\"positions\" >" >> test.xml
+
+num1=$(grep -nr "%BLOCK positions" $1 | awk -F: '{print $1}')
+posnum=$(( $num1 + 1))
+#echo $posnum
+num2=$(grep -nr "%ENDBLOCK positions" $1 | awk -F: '{print $1}')
+endposnum=$(( $num2 - 1))
+#echo $endposnum
+numatoms=$(($endposnum - $posnum + 1))
+echo "numatoms is $numatoms"
+
+factor=1.889726         #factor for Angstrom to a.u.
+
+blocklength=$((6+2*$numatoms))
+echo "blocklength is $blocklength"
+
+lines=$(wc -l $name.geom | awk '{print $1}')
+blockcounter=$((($lines-4)/$blocklength))       #obtain how many iterations are stored in .geom file
+echo $"blockcounter is $blockcounter"
+
+#transfrom coordinates in .geom file from cartesian (in atomic units) into fractional
+grep "<-- R" $name.geom | awk '{print $3 "\t" $4 "\t" $5 }' > helpfilecoords
+sed -i 's/E/e/g' helpfilecoords
+awk -v factorn="$factor" '{print $1/factorn "\t" $2/factorn "\t" $3/factorn }' helpfilecoords > helpfilecoordsnew
+
+awk 'FNR==NR{a[NR]=$1; a[NR+3]=$2; a[NR+6]=$3; next}{print $1*a[1]+a[4]*$2+a[7]*$3 "\t" $1*a[2]+a[5]*$2+a[8]*$3 "\t" $1*a[3]+a[6]*$2+a[9]*$3}' output helpfilecoordsnew > coords
+
+#transform unit cell vectors in .geom file from atomic units into Angstrom
+grep "<-- h" $name.geom | awk '{print $1 "\t" $2 "\t" $3 }' > helpfilecell
+sed -i 's/E/e/g' helpfilecell
+awk -v factorn="$factor" '{print $1/factorn "\t" $2/factorn "\t" $3/factorn }' helpfilecell > helpfilecellnew
+
+#store info on energy convergence
+grep "<-- E" $name.geom | awk '{printf "%.6f\n", $1*27 }' > energy
+
+#for ((line=$posnum;line<=$endposnum;line++)); do
+#head -n$line $1 | tail -n1 | awk '{print "<v>" "\t" $2 "\t" $3 "\t" $4 " </v>" }' >> test.xml
+#done
+head -n$numatoms coords | awk '{print "<v>" "\t" $1 "\t" $2 "\t" $3 "</v>" }' >> test.xml
+
+echo -e "</varray>\n</structure>\n<varray name=\"primitive_index\" >" >> test.xml
+for ((line=$posnum;line<=$endposnum;line++)); do
+i=$(($line - $posnum + 1))
+echo "<v type=\"int\" >        $i </v>" >> test.xml
+done
+echo -e "</varray>\n<parameters>\n<separator name=\"general\" >\n<i type=\"string\" name=\"SYSTEM\">$name </i>" >> test.xml
+head -n63 /home/scm81/Documents/Scripting/geom2vasprun/vasprun.xml | tail -n17 >> test.xml
+echo -e "<atoms>       $numatoms </atoms>" >> test.xml
+atomini="A"
+numberoftypes=0
+helpnumber=1
+END=$((9+$numatoms))
+for ((line=10;line<=END;line++)); do
+atom=$(head -n$line $name.geom | tail -n1 | awk '{print $1}')
+if [ "$atom" != "$atomini" ] ; then
+if [ $helpnumber > 1 ] && [ $atomini != "A" ] ; then
+echo "$atomini  $helpnumber   " >> helpfile1.txt
+fi
+atomini=$atom
+numberoftypes=$(($numberoftypes + 1 ))
+helpnumber=1
+else
+helpnumber=$(($helpnumber + 1 ))
+fi
+done
+echo "$atomini $helpnumber " >> helpfile1.txt
+echo -e " <types>       $numberoftypes  </types>\n<array name=\"atoms\" >\n  <dimension dim=\"1\">ion</dimension>\n  <field type=\"string\">element</field>\n  <field type=\"int\">atomtype</field>\n<set>"  >> test.xml
+
+for ((i=1;i<=$numberoftypes;i++)); do
+numberofatoms=$(head -n$i helpfile1.txt | tail -n1 | awk '{print $2}')
+for ((j=1;j<=$numberofatoms;j++)); do
+echo -e "<rc><c>$(head -n$i helpfile1.txt | tail -n1 | awk '{print $1}')</c><c>  $i</c></rc>" >> test.xml
+done
+done
+echo -e "</set>
+  </array>
+  <array name=\"atomtypes\" >
+   <dimension dim=\"1\">type</dimension>
+   <field type=\"int\">atomspertype</field>
+   <field type=\"string\">element</field>
+   <set>" >> test.xml
+for ((i=1;i<=$numberoftypes;i++)); do
+echo -e "<rc><c>   $(head -n$i helpfile1.txt | tail -n1 | awk '{print $2}')</c><c>$(head -n$i helpfile1.txt | tail -n1 | awk '{print $1}')</c></rc>" >> test.xml
+done
+
+echo "   </set>
+  </array>
+ </atominfo>
+ <structure name=\"initialpos\" >
+  <crystal>
+   <varray name=\"basis\" >" >> test.xml
+
+head -n3 helpfilecellnew | awk '{print "<v>" "\t" $1 "\t" $2 "\t" $3 "</v>" }' >> test.xml
+echo -e "</varray>\n</crystal>\n<varray name=\"positions\" >" >> test.xml
+head -n$numatoms coords | awk '{print "<v>" "\t" $1 "\t" $2 "\t" $3 "</v>" }' >> test.xml
+
+echo -e "</varray>\n<varray name=\"selective\"  type=\"logical\" >" >> test.xml
+for ((i=1;i<=$numatoms;i++)); do
+echo -e "<v type=\"logical\" >  T  T  T </v>" >> test.xml
+done
+
+echo -e "  <nose>
+   <v>      -3.00000000       0.00000000       0.00010000       0.00010000 </v>
+  </nose>
+ </structure>" >> test.xml
+
+#iterate over all geom steps in .geom file, first obtain unit cell, then coords of atoms, then energy
+for ((i=0;i<=$blockcounter;i++)); do
+echo -e " <calculation>
+  <structure>
+   <crystal>
+    <varray name=\"basis\" >" >> test.xml
+
+for ((cellline=1;cellline<4;cellline++)); do
+celllinecounter=$(($i*3+$cellline))
+echo -e "$(head -n$celllinecounter helpfilecellnew | tail -n1 | awk '{print "    <v>" "\t" $1 "\t" $2 "\t" $3 " </v>" }')" >> test.xml
+done
+echo -e "    </varray>
+   </crystal>
+   <varray name=\"positions\" >" >> test.xml
+
+for ((coordline=1;coordline<=$numatoms;coordline++)); do
+coordlinecount=$(($i*$numatoms+$coordline))
+echo -e "$(head -n$coordlinecount coords | tail -n1 | awk '{print "    <v>" "\t" $1 "\t" $2 "\t" $3 " </v>" }')" >> test.xml
+done
+
+echo -e "    </varray>
+  </structure>
+  <energy>
+   <i name=\"e_fr_energy\">    $(head -n$i energy | tail -n1| awk '{print $1}') </i>
+  </energy>" >> test.xml
+
+echo -e "  </calculation>" >> test.xml
+done
+
+#use last structure output in .geom file as final positions
+echo -e " <structure name=\"finalpos\" >
+  <crystal>
+   <varray name=\"basis\" >" >> test.xml
+tail -n3 helpfilecellnew | awk '{print "<v>" "\t" $1 "\t" $2 "\t" $3 "</v>" }' >> test.xml
+echo -e "</varray>\n</crystal>\n<varray name=\"positions\" >" >> test.xml
+tail -n$numatoms coords | awk '{print "<v>" "\t" $1 "\t" $2 "\t" $3 "</v>" }' >> test.xml
+echo -e "</varray>\n<varray name=\"selective\"  type=\"logical\" >" >> test.xml
+for ((i=1;i<=$numatoms;i++)); do
+echo -e "<v type=\"logical\" >  T  T  T </v>" >> test.xml
+done
+echo -e "  </varray>
+  <nose>
+   <v>      -3.00000000       0.00000000       0.00010000       0.00010000 </v>
+  </nose>
+ </structure>
+</modeling>" >> test.xml
+
+#delete all files that are only used in this script and will interfere with subsequent executions
+rm matrix.txt
+rm output
+rm helpfile*
+rm coords
+#rm energy
